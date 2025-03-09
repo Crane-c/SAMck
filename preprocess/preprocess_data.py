@@ -13,10 +13,10 @@ from sklearn.model_selection import train_test_split
 # ======================== 参数配置 ========================
 parser = argparse.ArgumentParser()
 parser.add_argument('--src_dir', type=str, 
-                    default='../data/Rock/RawData',
+                    default='./data/Rock/RawData',
                     help='原始数据目录，包含images和masks子目录')
 parser.add_argument('--dst_dir', type=str,
-                    default='../data/Rock/Processed',
+                    default='./data/Rock/Processed',
                     help='预处理结果保存目录')
 parser.add_argument('--img_size', type=int,
                     default=1024,
@@ -32,26 +32,39 @@ parser.add_argument('--ct_max', type=float,
                     help='CT值归一化上限(HU)')
 parser.add_argument('--use_normalize', action='store_true',
                     help='是否进行CT值归一化')
-args = parser.parse_args(['--src_dir', '../data/Rock/RawData', '--img_size', '1024'])
+args = parser.parse_args()
 
 # ======================== 预处理函数 ========================
 def process_slice(image_path, label_path):
-    """处理单个切片"""
-    # 读取数据
-    image = tifffile.imread(image_path)    # (H, W)
-    mask = np.array(Image.open(label_path)) # (H, W)
-    
-    # 调整尺寸
+    """处理单个岩土CT切片，适配SAM输入规范"""
+    image = tifffile.imread(image_path)    # (H, W) 原始CT值
+    mask = np.array(Image.open(label_path)) # (H, W) 原始标签
+
+    # 调整尺寸（保持插值策略）
     image = cv2.resize(image, (args.img_size, args.img_size), interpolation=cv2.INTER_LINEAR)
-    mask = cv2.resize(mask, (args.img_size, args.img_size), interpolation=cv2.INTER_NEAREST)
-    
-    # 归一化处理
+    mask = cv2.resize(mask, (args.img_size, args.img_size), interpolation=cv2.INTER_NEAREST)  # 保持标签的离散性
+
+    # 标准化处理（适配CT值和SAM模型要求）
     if args.use_normalize:
-        image = np.clip(image, args.ct_min, args.ct_max)
+        # 步骤1: CT值裁剪（防止异常值干扰）
+        image = np.clip(image, args.ct_min, args.ct_max + 1e-8)  # 典型值：args.ct_min=-1000, args.ct_max=2000
+        
+        # 步骤2: 归一化到 [0, 1]
         image = (image - args.ct_min) / (args.ct_max - args.ct_min)
-    
-    # 转换为三通道
+        
+        # 步骤3: SAM标准归一化（[0,1] -> 均值0.5/方差0.5）
+        # 记得验证它这个步骤是否必要
+        image = (image - 0.5) / 0.5  # 最终范围 [-1, 1]
+
+    # 转换为三通道（兼容SAM的输入格式）
     image_rgb = np.stack([image]*3, axis=-1)  # (H, W, 3)
+
+    # 数值范围验证（调试用）
+    '''
+    if args.debug:
+        print(f"图像范围: [{image_rgb.min():.2f}, {image_rgb.max():.2f}]")
+        print(f"标签类别: {np.unique(mask)}")
+    '''
     
     return image_rgb.astype(np.float32), mask.astype(np.uint8)
 
@@ -60,7 +73,7 @@ def preprocess_train_image(image_files, label_files):
     os.makedirs(f"{args.dst_dir}/train_npz", exist_ok=True)
     
     for img_path, lbl_path in tqdm(zip(image_files, label_files), desc="处理训练集"):
-        # 从文件名中提取案例ID（例如5-10101.tif → case5_10101）
+        # 从文件名中提取案例ID（例如5-10101.tif → 5_10101）
         case_id = os.path.basename(img_path).split('.')[0].replace('-', '_')
         
         # 处理并保存
@@ -77,7 +90,7 @@ def preprocess_valid_image(image_files, label_files):
     
     # 遍历所有验证集样本
     for img_path, lbl_path in tqdm(zip(image_files, label_files), desc="处理验证集"):
-        # 提取案例ID（例如5-10101.tif → case5_10101）
+        # 提取案例ID（例如5-10101.tif → 5_10101）
         case_id = os.path.basename(img_path).split('.')[0].replace('-', '_')
         
         # 处理切片
@@ -92,7 +105,7 @@ def preprocess_valid_image(image_files, label_files):
 if __name__ == "__main__":
     # 获取所有图像和标注文件（确保一一对应）
     image_files = sorted(glob(f"{args.src_dir}/images/*.tif"))
-    label_files = sorted([f.replace('images', 'masks').replace('.tif', '_SimpleSegmentation.png') for f in image_files])
+    label_files = sorted([f.replace('images', 'masks').replace('.tif', '_Simple Segmentation.png') for f in image_files])
     
     # 验证文件存在性
     missing = [lbl for lbl in label_files if not os.path.exists(lbl)]
