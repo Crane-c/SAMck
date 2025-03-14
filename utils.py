@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import imageio
 from einops import repeat
 from icecream import ic
+from PIL import Image
 
 
 class Focal_loss(nn.Module):
@@ -104,68 +105,73 @@ def calculate_metric_percase(pred, gt):
     if pred.sum() > 0 and gt.sum() > 0:
         dice = metric.binary.dc(pred, gt)
         hd95 = metric.binary.hd95(pred, gt)
-        return dice, hd95
+        intersection = np.sum(pred * gt)
+        union = np.sum(pred) + np.sum(gt) - intersection
+        iou = intersection / (union + 1e-5)
+        return dice, hd95, iou
     elif pred.sum() > 0 and gt.sum() == 0:
-        return 1, 0
+        return 1, 0, 1
     else:
-        return 0, 0
+        return 0, 0, 0
 
+def save_prediction_as_image(prediction, save_path, case_id, prefix="prediction"):
+    """
+    Save the prediction as a single image.
+    :param prediction: Model prediction (numpy array)
+    :param save_path: Path to save the image
+    :param case_id: Case identifier
+    :param prefix: Prefix for the saved image file
+    """
+    # Normalize prediction for visualization
+    prediction = (prediction - prediction.min()) / (prediction.max() - prediction.min()) * 255
+    prediction = prediction.astype(np.uint8)
+
+    # Save as PNG image
+    img = Image.fromarray(prediction)
+    img.save(os.path.join(save_path, f"{prefix}_{case_id}.png"))
 
 def test_single_volume(image, label, net, classes, multimask_output, patch_size=[256, 256], input_size=[224, 224],
                        test_save_path=None, case=None, z_spacing=1):
     image, label = image.squeeze(0).cpu().detach().numpy(), label.squeeze(0).cpu().detach().numpy()
-    if len(image.shape) == 3:
-        prediction = np.zeros_like(label)
-        for ind in range(image.shape[0]):
-            slice = image[ind, :, :]
-            x, y = slice.shape[0], slice.shape[1]
-            if x != input_size[0] or y != input_size[1]:
-                slice = zoom(slice, (input_size[0] / x, input_size[1] / y), order=3)  # previous using 0
-            new_x, new_y = slice.shape[0], slice.shape[1]  # [input_size[0], input_size[1]]
-            if new_x != patch_size[0] or new_y != patch_size[1]:
-                slice = zoom(slice, (patch_size[0] / new_x, patch_size[1] / new_y), order=3)  # previous using 0, patch_size[0], patch_size[1]
-            inputs = torch.from_numpy(slice).unsqueeze(0).unsqueeze(0).float().cuda()
-            inputs = repeat(inputs, 'b c h w -> b (repeat c) h w', repeat=3)
-            net.eval()
-            with torch.no_grad():
-                outputs = net(inputs, multimask_output, patch_size[0])
-                output_masks = outputs['masks']
-                out = torch.argmax(torch.softmax(output_masks, dim=1), dim=1).squeeze(0)
-                out = out.cpu().detach().numpy()
-                out_h, out_w = out.shape
-                if x != out_h or y != out_w:
-                    pred = zoom(out, (x / out_h, y / out_w), order=0)
-                else:
-                    pred = out
-                prediction[ind] = pred
-        # only for debug
-        # if not os.path.exists('/output/images/pred'):
-        #     os.makedirs('/output/images/pred')
-        # if not os.path.exists('/output/images/label'):
-        #     os.makedirs('/output/images/label')
-        # assert prediction.shape[0] == label.shape[0]
-        # for i in range(label.shape[0]):
-        #     imageio.imwrite(f'/output/images/pred/pred_{i}.png', prediction[i])
-        #     imageio.imwrite(f'/output/images/label/label_{i}.png', label[i])
-        # temp = input('kkpsa')
-    else:
-        x, y = image.shape[-2:]
-        if x != patch_size[0] or y != patch_size[1]:
-            image = zoom(image, (patch_size[0] / x, patch_size[1] / y), order=3)
-        inputs = torch.from_numpy(image).unsqueeze(
-            0).unsqueeze(0).float().cuda()
-        inputs = repeat(inputs, 'b c h w -> b (repeat c) h w', repeat=3)
-        net.eval()
-        with torch.no_grad():
-            outputs = net(inputs, multimask_output, patch_size[0])
-            output_masks = outputs['masks']
-            out = torch.argmax(torch.softmax(output_masks, dim=1), dim=1).squeeze(0)
-            prediction = out.cpu().detach().numpy()
-            if x != patch_size[0] or y != patch_size[1]:
-                prediction = zoom(prediction, (x / patch_size[0], y / patch_size[1]), order=0)
+    print(image.shape, label.shape)
+
+    if image.shape[-1] == 3:
+        image = np.mean(image, axis=-1)  # Convert RGB to grayscale
+
+    # Resize image to input_size
+    x, y = image.shape
+    if x != input_size[0] or y != input_size[1]:
+        image = zoom(image, (input_size[0] / x, input_size[1] / y), order=3)
+
+    # Resize image to patch_size
+    new_x, new_y = image.shape
+    if new_x != patch_size[0] or new_y != patch_size[1]:
+        image = zoom(image, (patch_size[0] / new_x, patch_size[1] / new_y), order=3)
+
+    # Convert to tensor and add batch and channel dimensions
+    inputs = torch.from_numpy(image).unsqueeze(0).unsqueeze(0).float().cuda()
+    inputs = repeat(inputs, 'b c h w -> b (repeat c) h w', repeat=3)
+
+    # Inference
+    net.eval()
+    with torch.no_grad():
+        outputs = net(inputs, multimask_output, patch_size[0])
+        output_masks = outputs['masks']
+        out = torch.argmax(torch.softmax(output_masks, dim=1), dim=1).squeeze(0)
+        prediction = out.cpu().detach().numpy()
+
+    # Resize prediction back to original size
+    if x != patch_size[0] or y != patch_size[1]:
+        prediction = zoom(prediction, (x / patch_size[0], y / patch_size[1]), order=0)
+
+    if test_save_path is not None:
+                    save_prediction_as_image(prediction, test_save_path, case, prefix="pred")
+          
     metric_list = []
     for i in range(1, classes + 1):
-        metric_list.append(calculate_metric_percase(prediction == i, label == i))
+        dice, hd95, iou = (calculate_metric_percase(prediction == i, label == i))
+
+        metric_list.append([dice, hd95, iou])
 
     if test_save_path is not None:
         img_itk = sitk.GetImageFromArray(image.astype(np.float32))

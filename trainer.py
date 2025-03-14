@@ -96,7 +96,7 @@ def trainer_rock(args, model, snapshot_path, multimask_output, low_res):
             low_res_label_batch = low_res_label_batch.cuda()
             # assert image_batch.max() <= 3, f'image_batch max: {image_batch.max()}'
             # 正确断言（假设归一化到 [-1,1]）
-            assert -1.0 <= image_batch.min() and image_batch.max() <= 1.0, \
+            assert 0 <= image_batch.min() and image_batch.max() <= 1.0, \
                 f"图像数据范围异常: [{image_batch.min()}, {image_batch.max()}]"
             outputs = model(image_batch, multimask_output, args.img_size)
             loss, loss_ce, loss_dice = calc_loss(outputs, low_res_label_batch, ce_loss, dice_loss, args.dice_param)

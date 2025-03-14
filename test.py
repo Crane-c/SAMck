@@ -30,13 +30,14 @@ def inference(args, multimask_output, db_config, model, test_save_path=None):
     testloader = DataLoader(db_test, batch_size=args.batch_size, shuffle=False, num_workers=1)
     logging.info(f'测试样本数量: {len(db_test)}, 批次数量: {len(testloader)}')
     model.eval()
-    metric_list = np.zeros((args.num_classes, 2))  # 存储每类的dice和hd95
+    metric_list = np.zeros((args.num_classes, 3))  # 存储每类的dice、hd95、iou
 
     with torch.no_grad(), torch.cuda.amp.autocast():
         for batch_idx, sample in tqdm(enumerate(testloader), total=len(testloader)):
             # 数据准备
+            args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
             images = sample['image'].to(args.device)    # (B, C, H, W)
-            labels = sample['label'].numpy()            # (B, H, W)
+            labels = sample['label'].to(args.device)           # (B, H, W)
             case_ids = sample['case_id']
             
             # 逐样本处理
@@ -45,28 +46,31 @@ def inference(args, multimask_output, db_config, model, test_save_path=None):
                 metric_i = test_single_volume(
                     image=images[i].unsqueeze(0),  # (1, C, H, W)
                     label=labels[i],               # (H, W)
-                    model=model,
+                    net=model,
                     classes=args.num_classes,
                     input_size=[args.input_size, args.input_size],    # SAM输入尺寸（如1024）
                     patch_size=[args.img_size, args.img_size],    # 分块推理尺寸（适配显存）
                     multimask_output=multimask_output,        # 岩土任务通常单mask输出
                     test_save_path=test_save_path,
-                    case_id=case_ids[i],
-                    class_to_name=class_to_name    # 传入类别映射
+                    case=case_ids[i],
+                    z_spacing=db_config['z_spacing']
                 )
-                metric_list += metric_i
+                metric_list += np.array(metric_i)
     
     metric_list = metric_list / len(db_test)
     for cls in range(args.num_classes - 1):
         cls_name = class_to_name[cls]
         dice = metric_list[cls][0]
         hd95 = metric_list[cls][1]
-        logging.info(f"[相态分类] {cls_name} | Dice: {dice:.4f} | HD95: {hd95:.2f}mm")
+        iou = metric_list[cls][2]
+        logging.info(f"[相态分类] {cls_name} | Dice: {dice:.4f} | HD95: {hd95:.2f}mm | IoU: {iou:.4f}")
+
     # 全局统计
     valid_metrics = metric_list[:3]
     avg_dice = np.mean(valid_metrics[:, 0])  # 排除背景
     avg_hd95 = np.mean(valid_metrics[:, 1])
-    logging.info(f"[综合指标] 平均Dice: {avg_dice:.4f} | 平均HD95: {avg_hd95:.2f}mm")
+    avg_iou = np.mean(valid_metrics[:, 2])
+    logging.info(f"[综合指标] 平均Dice: {avg_dice:.4f} | 平均HD95: {avg_hd95:.2f}mm | 平均IoU: {avg_iou:.4f}")
     logging.info("Testing Finished!")
     return 1
 
@@ -86,18 +90,19 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default=None, help='The config file provided by the trained model')
     parser.add_argument('--volume_path', type=str, default='./data/Rock/Processed/test_vol_h5/')
     parser.add_argument('--dataset', type=str, default='Rock', help='Dataset name')
-    parser.add_argument('--num_classes', type=int, default=8)
+    parser.add_argument('--num_classes', type=int, default=4)
     parser.add_argument('--list_dir', type=str, default='./lists/lists_Rock/', help='list_dir')
-    parser.add_argument('--output_dir', type=str, default='/output')
+    parser.add_argument('--output_dir', type=str, default='./output/test')
     parser.add_argument('--img_size', type=int, default=1024, help='Input image size of the network')
     parser.add_argument('--input_size', type=int, default=224, help='The input size for training SAM model')
+    parser.add_argument('--batch_size', type=int, default=2, help='The bstch size for training SAM model')
     parser.add_argument('--seed', type=int,
                         default=1234, help='random seed')
     parser.add_argument('--is_savenii', action='store_true', help='Whether to save results during inference')
     parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
     parser.add_argument('--ckpt', type=str, default='checkpoints/sam_vit_b_01ec64.pth',
                         help='Pretrained checkpoint')
-    parser.add_argument('--lora_ckpt', type=str, default='checkpoints/sam_vit_b_01ec64.pth', help='The checkpoint from LoRA')
+    parser.add_argument('--lora_ckpt', type=str, default='output/sam/results/Rock_1024_pretrain_vit_b_30k_epo15_bs2_lr0.0001/epoch_14.pth', help='The checkpoint from LoRA')
     parser.add_argument('--vit_name', type=str, default='vit_b', help='Select one vit model')
     parser.add_argument('--rank', type=int, default=4, help='Rank for LoRA adaptation')
     parser.add_argument('--module', type=str, default='sam_lora_image_encoder')
