@@ -54,7 +54,7 @@ def process_slice(image_path, label_path):
         
         # 步骤3: SAM标准归一化（[0,1] -> 均值0.5/方差0.5）
         # 记得验证它这个步骤是否必要
-        image = (image - 0.5) / 0.5  # 最终范围 [-1, 1]
+        # image = (image - 0.5) / 0.5  # 最终范围 [-1, 1]
 
     # 转换为三通道（兼容SAM的输入格式）
     image_rgb = np.stack([image]*3, axis=-1)  # (H, W, 3)
